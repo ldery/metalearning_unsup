@@ -206,7 +206,7 @@ def train_nn(tr_x, tr_y, ts_x, ts_y, aux, lr=1e-3, n_epochs=10, wd=0.1):
 			dev_r2 = r2_score(val_y.numpy(), model(val_x).detach().numpy())
 			test_r2 = r2_score(ts_y.numpy(), model(ts_x).detach().numpy())
 			dev_r2s.append(dev_r2)
-			print('Iter {} | Dev Score {} | Test Score {} '.format(i, dev_r2, test_r2))
+			# print('Iter {} | Dev Score {} | Test Score {} '.format(i, dev_r2, test_r2))
 			if np.argmax(dev_r2s) == i:
 				# We have reached a good point
 				model_cpy = deepcopy(model)
@@ -265,7 +265,7 @@ for lr in [1e-3, 7e-3, 1e-2, 3e-2]:
 		# try:
 		set_seed(0)
 		train_nn(xy_tr[0], xy_tr[1], xy_ts[0], xy_ts[1], x_aux, lr=lr, n_epochs=200, wd=wd)
-		exit()
+		# exit()
 		# except:
 		# 	print('		Issue arose')
 
