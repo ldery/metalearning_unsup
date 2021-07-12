@@ -191,7 +191,7 @@ def train_nn(tr_x, tr_y, ts_x, ts_y, aux, lr=1e-3, n_epochs=10, wd=0.1):
 		loss_fn = nn.MSELoss()
 
 		# we can just do full batched gradient descent here
-		optim = Adam(model.parameters(), lr=lr)  # , weight_decay=wd)
+		optim = AdamW(model.parameters(), lr=lr, weight_decay=wd)
 		dev_r2s, test_r2s = [], []
 		model_cpy = None
 		for i in range(n_epochs):
@@ -222,11 +222,11 @@ def train_nn(tr_x, tr_y, ts_x, ts_y, aux, lr=1e-3, n_epochs=10, wd=0.1):
 	print('		This is the R^2 = {:.5f} at epoch {}'.format(best_r2, best_idx))
 	print('		Performing Self Training')
 
-	# tr_x, tr_y = torch.vstack((tr_x, aux)), torch.vstack((tr_y, aux_y))
-	# dev_r2s, test_r2s, aux_y = make_n_run(tr_x, tr_y, aux)
-	# best_idx = np.argmax(dev_r2s)
-	# best_r2 = test_r2s[best_idx]
-	# print('		This is the R^2 = {:.5f} at epoch {}'.format(best_r2, best_idx))
+	tr_x, tr_y = torch.vstack((tr_x, aux)), torch.vstack((tr_y, aux_y))
+	dev_r2s, test_r2s, aux_y = make_n_run(tr_x, tr_y, aux)
+	best_idx = np.argmax(dev_r2s)
+	best_r2 = test_r2s[best_idx]
+	print('		This is the R^2 = {:.5f} at epoch {}'.format(best_r2, best_idx))
 
 
 
@@ -264,7 +264,7 @@ for lr in [1e-3, 7e-3, 1e-2, 3e-2]:
 		print('This is when lr = ', lr, ' wd = ', wd)
 		# try:
 		set_seed(0)
-		train_nn(xy_tr[0], xy_tr[1], xy_ts[0], xy_ts[1], x_aux, lr=lr, n_epochs=200, wd=wd)
+		train_nn(xy_tr[0], xy_tr[1], xy_ts[0], xy_ts[1], x_aux, lr=lr, n_epochs=300, wd=wd)
 		# exit()
 		# except:
 		# 	print('		Issue arose')

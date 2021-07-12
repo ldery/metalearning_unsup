@@ -40,7 +40,7 @@ def get_problem(d, n_tr, n_ts, n_aux, s_x, s_e1, s_e2):
 	w_opt = np.random.normal(scale=s_x, size=(1, d))
 	x_aux, y_aux = get_xy_pair(n_aux)
 	# overwrite the last dimension
-	x_aux[:, -1:] = y_aux[:]
+	# x_aux[:, -1:] = y_aux[:]
 
 	return w_opt, get_xy_pair(n_tr), get_xy_pair(n_ts), x_aux
 
@@ -55,7 +55,7 @@ class ResNet(nn.Module):
 	def forward(self, inp):
 		out = F.relu(self.fc1(inp))
 		out = F.relu(self.fc2(inp + out))
-		return self.fc3(out)
+		return self.fc3(out)  # torch.tanh()
 
 
 class UnsupNet(nn.Module):
@@ -89,6 +89,14 @@ class UnsupNet(nn.Module):
 		elif type_ == 'aux':
 			out = self.aux_model(rep)
 			return out.mean()
+
+
+def norm_(list_of_tensors):
+	norm = 0
+	for x in list_of_tensors:
+		if x is not None:
+			norm += (x**2).sum().item()
+	return norm
 
 
 def make_n_run_meta(
@@ -148,6 +156,8 @@ def make_n_run_meta(
 			pred = model(this_x, type_='prim')
 			prim_loss = loss_fn(pred, this_y)
 			prim_loss.backward()
+			# get statistics
+
 			avg_prim_loss += prim_loss.item()
 
 			aux_loss = model(aux_x, type_='aux')
@@ -160,14 +170,20 @@ def make_n_run_meta(
 		writer.add_scalar("{}/primloss_train.body".format(id_), avg_prim_loss / phase_, i)
 		writer.add_scalar("{}/aux_train.body".format(id_), avg_aux_loss / phase_, i)
 
-
 		# do evaluation here
 		model.eval()
+		train_r2 = r2_score(this_y.numpy(), model(this_x, type_='prim').detach().numpy())
 		dev_r2 = r2_score(val_y.numpy(), model(val_x, type_='prim').detach().numpy())
 		test_r2 = r2_score(ts_y.numpy(), model(ts_x, type_='prim').detach().numpy())
 		dev_r2s.append(dev_r2)
 		test_r2s.append(test_r2)
-		aux_score = model(aux_x, type_='aux').item()
+
+		writer.add_scalars(
+							"{}/r2_score".format(id_),
+							{'train': train_r2, 'dev': dev_r2, 'test': test_r2},
+							i
+						)
+		# aux_score = model(aux_x, type_='aux').item()
 		# print('Iter {} | Dev Score {:.3f} | Test Score {:.3f} | Aux Score {:.3f}'.format(i, dev_r2, test_r2, aux_score))
 		if np.argmax(dev_r2s) == i:
 			# We have reached a good point
@@ -292,7 +308,6 @@ def train_nn(
 												wd, lr, epochs=int(n_epochs * 1.5)
 											)
 
-	# dev_r2s, test_r2s, aux_y = make_n_run(network, d_tr, d_val, aux, d_ts, wd, lr, epochs=int(n_epochs * 1.5))
 	best_idx = np.argmax(dev_r2s)
 	best_r2 = test_r2s[best_idx]
 	print('		This is the R^2 = {:.5f} at epoch {}'.format(best_r2, best_idx))
@@ -325,12 +340,12 @@ for alpha in [0, 0.1, 1, 10, 20, 30]:
 
 
 print('Training 3 Layer NN Model')
-for lr in [1e-3]:  # , 7e-3, 1e-2, 3e-2]:
-	for wd in [1]:
+for lr in [1e-3, 7e-3, 1e-2, 3e-2]:
+	for wd in [0, 1, 0.1, 0.01]:
 		print('This is when lr = ', lr, ' wd = ', wd)
 		# try:
 		set_seed(0)
-		writer = SummaryWriter('runs/Unsup_lr={:.3f}.wd={:.3f}'.format(lr, wd))
+		writer = SummaryWriter('runs/no_labels.longest.Unsup_lr={:.3f}.wd={:.3f}'.format(lr, wd))
 		train_nn(xy_tr[0], xy_tr[1], xy_ts[0], xy_ts[1], x_aux, lr=lr, n_epochs=200, wd=wd, is_meta=True, writer=writer)
 		writer.flush()
 		writer.close()
