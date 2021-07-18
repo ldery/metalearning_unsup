@@ -56,16 +56,32 @@ class NetworkBlock(nn.Module):
 	def forward(self, x):
 		return self.layer(x)
 
+import pdb
+class ResNet(nn.Module):
+	def __init__(self, h, o):
+		super(ResNet, self).__init__()
+		self.fc1 = nn.Linear(h, h)
+		self.fc2 = nn.Linear(h, h)
+		self.fc3 = nn.Linear(h, h)
+		self.fc4 = nn.Linear(h, o, bias=False)
+
+	def forward(self, inp):
+		# Todo [ldery] - try out relu instead of leaky_relu
+		out = F.relu(self.fc1(inp))
+		out1 = F.relu(self.fc2(out)) + inp
+		out = F.relu(self.fc3(out1)) + inp
+		out = torch.tanh(self.fc4(out))
+		return out.mean(axis=0)
 
 class WideResNet(nn.Module):
-	def __init__(self, depth, out_dict, widen_factor=1, dropRate=0.0):
+	def __init__(self, depth, out_dict, insize=3, widen_factor=1, dropRate=0.0):
 		super(WideResNet, self).__init__()
 		nChannels = [16, 16 * widen_factor, 32 * widen_factor, 64 * widen_factor]
 		assert((depth - 4) % 6 == 0)
 		n = (depth - 4) / 6
 		block = BasicBlock
 		# 1st conv before any network block
-		self.conv1 = nn.Conv2d(3, nChannels[0], kernel_size=3, stride=1, padding=1, bias=False)
+		self.conv1 = nn.Conv2d(insize, nChannels[0], kernel_size=3, stride=1, padding=1, bias=False)
 		# 1st block
 		self.block1 = NetworkBlock(n, nChannels[0], nChannels[1], block, 1, dropRate)
 		# 2nd block
@@ -75,10 +91,11 @@ class WideResNet(nn.Module):
 		# global average pooling and classifier
 		self.bn1 = nn.BatchNorm2d(nChannels[3])
 		self.relu = nn.ReLU(inplace=True)
+		self.nChannels = nChannels[3]
 		for head_name, num_classes in out_dict.items():
 			this_head = nn.Linear(nChannels[3], num_classes)
 			self.add_module("fc-{}".format(head_name), this_head)
-		self.nChannels = nChannels[3]
+
 
 	# Added by ldery. Adds a new head to the model
 	def add_heads(self, class_dict, is_cuda=True, init_fn=None):
@@ -87,11 +104,16 @@ class WideResNet(nn.Module):
 			# This head is already present. We can skip
 			if this_head is not None:
 				continue
-			this_head = nn.Linear(self.nChannels, num_classes)
+			if 'meta' not in head_name:
+				this_head = nn.Linear(self.nChannels, num_classes)
+			else:
+				this_head = ResNet(self.nChannels, num_classes)
 			if is_cuda:
 				this_head = this_head.cuda()
 			if init_fn is not None:
 				init_fn(this_head)
+			if 'meta' in head_name:
+				self.meta_auxmodel = this_head
 			self.add_module("fc-{}".format(head_name), this_head)
 
 	# use if we just want the logits before the classifier heads

@@ -19,8 +19,8 @@ def add_model_opts(parser):
 	parser.add_argument('-init-method', type=str, default='xavier_unif', choices=['xavier_unif', 'kaiming_unif'])
 	parser.add_argument('-loss-fn', type=str, default='CE', choices=['CE', 'BCE', 'MSE'])
 	# For WideResnet Model
-	parser.add_argument('-depth', type=int, default=22)
-	parser.add_argument('-widen-factor', type=int, default=4)
+	parser.add_argument('-depth', type=int, default=16)
+	parser.add_argument('-widen-factor', type=int, default=2)
 	parser.add_argument('-dropRate', type=float, default=0.1)
 	parser.add_argument('-ft-dropRate', type=float, default=0.1)
 	return parser
@@ -99,13 +99,18 @@ class Model(nn.Module):
 class WideResnet(Model):
 	def __init__(
 					self, out_class_dict, depth, widen_factor,
-					loss_name='CE', dropRate=0.0
+					loss_name='CE', dropRate=0.0, insize=3
 				):
 		super(WideResnet, self).__init__(
 									loss_name=loss_name,
 								)
-		self.model = WideResNet(depth, out_class_dict, widen_factor=widen_factor, dropRate=dropRate)
+		self.model = WideResNet(depth, out_class_dict, insize=insize, widen_factor=widen_factor, dropRate=dropRate)
 		self.model.apply(weight_init('kaiming_normal'))
 
 	def add_heads(self, class_dict, is_cuda=True):
 		self.model.add_heads(class_dict, is_cuda=is_cuda, init_fn=weight_init('kaiming_normal'))
+	
+	def reset_head(self, head_name):
+		head = primhead = getattr(self.model, "fc-{}".format(head_name), None)
+		assert head is not None, 'Invalid head name provided : {}'.format(head)
+		head.apply(weight_init('kaiming_normal'))
