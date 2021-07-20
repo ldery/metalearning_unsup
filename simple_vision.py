@@ -12,6 +12,7 @@ import random
 import higher
 import gc
 from copy import deepcopy
+from sklearn.linear_model import RidgeClassifier
 
 
 # Setup the arguments
@@ -36,9 +37,12 @@ def get_options():
 	parser.add_argument('-bsz', type=int, default=64)
 	parser.add_argument('-aux_bsz', type=int, default=128)
 	parser.add_argument('-iterated-steps', type=int, default=1)
+	parser.add_argument('-meta-iterated-steps', type=int, default=5)
+
 	parser.add_argument('-aux-wd', type=float, default=1e-2)
 	parser.add_argument('-dataset', type=str, default='MNIST', choices=['MNIST', 'CIFAR10'])
 	parser.add_argument('-img_channels', type=int, default=3)
+	parser.add_argument('-joint-tr-epoch', type=int, default=0)
 
 	add_model_opts(parser)
 	opts = parser.parse_args()
@@ -196,15 +200,19 @@ def train(train_, val_, test_, args, aux_=None):
 		print("         | Vl Loss = {:.3f} | Vl Acc = {:.3f}".format(val_avg_loss, val_avg_acc))
 		print("         | Ts Loss = {:.3f} | Ts Acc = {:.3f}".format(test_avg_loss, test_avg_acc))
 		print('\n')
+
 		val_accs.append(val_avg_acc)
 		test_accs.append(test_avg_acc)
 		val_losses.append(val_avg_loss)
 		if scheduler is not None:
 			scheduler.step(val_avg_acc)
+
 		# Save the best model
-		if val_avg_acc >= np.argmax(val_accs):
+		if val_avg_acc >= np.max(val_accs):
 			best_idx = i
 			best_model = deepcopy(model)
+
+		# Check if we need to break
 		best_is_old = (best_idx < i - args.patience)
 		if (len(val_accs) > args.patience + 1) and best_is_old:
 			break
@@ -227,7 +235,7 @@ def get_meta_optims(args, model):
 	all_optim = Adam(model.parameters(), lr=args.lr)
 
 	# bad design but don't really care atm
-	primhead = getattr(model.model, "fc-main", None)
+	primhead = getattr(model.model, "fc-proxy_main", None)
 	assert primhead is not None, 'The primary head is not intialized'
 	primhead_optim = Adam(primhead.parameters(), lr=args.lr)
 	primhead_scheduler = ReduceLROnPlateau(primhead_optim, mode='max', factor=0.5, patience=5, min_lr=5e-6)
@@ -245,13 +253,43 @@ def get_meta_optims(args, model):
 	return (primhead_optim, body_optim, aux_optim, all_optim), \
 			(primhead_scheduler, auxhead_scheduler, body_scheduler)
 
+def set_dev_head(model, data, dev_key, wd=0.1):
+		xs, ys = data
+		x_embed = model(xs, body_only=True)
+
+		# Fit a linear model
+		xs, ys = x_embed.cpu().detach().numpy(), ys.cpu().detach().numpy()
+		clf = RidgeClassifier(alpha=wd).fit(xs, ys)
+
+		w, b = torch.tensor(clf.coef_).cuda(), torch.tensor(clf.intercept_).cuda()
+		with torch.no_grad():
+			# get the dev_head
+			dev_head = getattr(model.model, "fc-{}".format(dev_key), None)
+			# Now replace the dev_head with the linear model
+			dev_head.weight.data.copy_(w)
+			dev_head.bias.data.copy_(b)
+
+def get_allclass_batch(data, bsz, shuffle=True, num_classes=10):
+	idxs = np.random.choice(len(data[0]), bsz)
+	unique = set([data[1][i] for i in idxs])
+	has_all_idxs = len(unique) == num_classes
+	while not has_all_idxs:
+		idxs = np.random.choice(len(data[0]), bsz)
+		unique = set([data[1][i] for i in idxs])
+		has_all_idxs = len(unique) == num_classes
+	xs, ys = [], []
+	for idx in idxs:
+		xs.append(data[0][idx])
+		ys.append(data[1][idx])
+	xs, ys = torch.stack(xs).float().cuda(), torch.tensor(ys).cuda()
+	return xs, ys
 
 def meta_train(train_, val_, test_, aux_, args):
 	out_dict = {'main': args.num_classes}
 	model = WideResnet(out_dict, args.depth, args.widen_factor, insize=args.img_channels, dropRate=args.dropRate)
 	model.cuda()
 	model.add_heads({'meta_aux': 1})
-# 	model.add_heads({'proxy_main': args.num_classes})
+	model.add_heads({'proxy_main': args.num_classes})
 	optims, schedulers = get_meta_optims(args, model)
 	prim_head_optim, body_optim, aux_optim, all_optim = optims
 	auxparam_start, auxparam_end = get_aux_start_end(model)
@@ -260,20 +298,19 @@ def meta_train(train_, val_, test_, aux_, args):
 	best_idx, best_model = -1, None
 	for i in range(args.num_epochs):
 		# For iterated_steps, keep the body and aux-model fixed and learn a primary task head
-		# reset the head so we have a fresh embedding : 
-# 		model.reset_head('main')
+		# reset the head so we have a fresh head for estimating downstream quality of embeddings : 
+		model.reset_head('proxy_main')
 		torch.cuda.empty_cache()
 		gc.collect()
-		for j in range(args.iterated_steps):
-			itr_ = get_iterator(train_, args.bsz, shuffle=True)
-			for xs, ys in itr_:
-				_, _, _, loss_tensor = batch_stats(model, xs, ys, return_loss=True)
-				loss_tensor.backward()
-				prim_head_optim.step()
-				all_optim.zero_grad()
 		
-		# For n iterates, keep train aux model and keep rest fixed
-		for j in range(args.iterated_steps):
+		# Estimate a proxy-head from the current representations using the training data
+		p_xs, p_ys  = get_allclass_batch(train_, args.bsz, shuffle=True)
+		set_dev_head(model, (p_xs, p_ys), 'proxy_main', wd=args.aux_wd)
+		
+		# For n iterates, keep train aux model and keep rest fixed.
+		# Want to find the auxiliary model such that taking a gd step based on
+		# aux-model will result in representations that improve perf of validation data
+		for j in range(args.meta_iterated_steps):
 			itr_ = get_iterator(val_, args.bsz, shuffle=True)
 			aux_itr_ = get_iterator(aux_, args.aux_bsz, shuffle=True)
 			for xs, ys in itr_:
@@ -282,7 +319,7 @@ def meta_train(train_, val_, test_, aux_, args):
 					this_auxloss = fmodel(aux_x, head_name='meta_aux')
 					diff_bodyoptim.step(this_auxloss)
 
-					prim_loss = fmodel.loss_fn(fmodel(xs, head_name='main'), ys)
+					prim_loss = fmodel.loss_fn(fmodel(xs, head_name='proxy_main'), ys)
 					aux_params = list(fmodel.parameters(time=0))[auxparam_start:auxparam_end]
 					aux_grads = torch.autograd.grad(prim_loss, aux_params, allow_unused=True)
 					for p, g in zip(model.model.meta_auxmodel.parameters(), aux_grads):
@@ -298,9 +335,9 @@ def meta_train(train_, val_, test_, aux_, args):
 		aux_total, total_auxloss = 0.0, 0.0
 		for j in range(args.iterated_steps):
 			aux_itr_ = get_iterator(aux_, args.aux_bsz, shuffle=True)
+			# Train the body using the auxiliary data
 			for aux_xs, aux_ys in aux_itr_:
 				# get on auxiliary
-# 				aux_xs, aux_ys = next(aux_itr_)
 				aux_loss = batch_stats(model, aux_xs, aux_ys, head_name='meta_aux', return_loss=True)
 				aux_loss.backward()
 				
@@ -310,21 +347,38 @@ def meta_train(train_, val_, test_, aux_, args):
 				total_auxloss += (aux_loss.item())*len(aux_ys)
 				aux_total += len(aux_ys)
 			
-			itr_ = get_iterator(train_, args.bsz, shuffle=True)
-			for xs, ys in itr_:
-				# get on primary
-				correct_, loss_, len_, loss_tensor = batch_stats(model, xs, ys, return_loss=True)
-				loss_tensor.backward()
-				
-				
-				body_optim.step()
-				all_optim.zero_grad()
+			if i > args.joint_tr_epoch:
+				if (i == args.joint_tr_epoch + 1):
+					print('Starting Joint Training')
+				itr_ = get_iterator(train_, args.bsz, shuffle=True)
+				for xs, ys in itr_:
+					# get on primary
+					correct_, loss_, len_, loss_tensor = batch_stats(model, xs, ys, return_loss=True)
+					loss_tensor.backward()
 
-				total_correct += correct_
-				total_loss += loss_
-				total += len_
+					# body_optim.step()
+					all_optim.step()
+					all_optim.zero_grad()
 
-		train_avg_acc, train_avg_loss = total_correct / total, total_loss / total
+					total_correct += correct_
+					total_loss += loss_
+					total += len_
+				train_avg_acc, train_avg_loss = total_correct / total, total_loss / total
+			else:
+				# Train only the body to produce representations that would improve performance on
+				# proxy-main head
+				itr_ = get_iterator(train_, args.bsz, shuffle=True)
+				for xs, ys in itr_:
+					correct_, loss_, len_, loss_tensor = batch_stats(model, xs, ys, head_name='proxy_main', return_loss=True)
+					loss_tensor.backward()
+
+					body_optim.step()
+					all_optim.zero_grad()
+
+					total_correct += correct_
+					total_loss += loss_
+					total += len_
+				train_avg_acc, train_avg_loss = total_correct / total, total_loss / total
 		aux_avg_loss = total_auxloss / aux_total
 		val_avg_acc, val_avg_loss = evaluate(model, val_)
 		test_avg_acc, test_avg_loss = evaluate(model, test_)
@@ -339,7 +393,7 @@ def meta_train(train_, val_, test_, aux_, args):
 # 			for scheduler in schedulers:
 # 				scheduler.step(val_avg_acc)
 		# Save the best model
-		if val_avg_acc >= np.argmax(val_accs):
+		if val_avg_acc >= np.max(val_accs):
 			best_idx = i
 			best_model = deepcopy(model)
 		best_is_old = (best_idx < i - args.patience)
